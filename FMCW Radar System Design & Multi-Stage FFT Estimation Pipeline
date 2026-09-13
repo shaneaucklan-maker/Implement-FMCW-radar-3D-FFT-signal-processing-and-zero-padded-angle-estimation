@@ -1,0 +1,103 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# --- 1. FMCW 시스템 파라미터 ---
+c = 3e8                   # 빛의 속도 (m/s)
+fc = 77e9                 # 반송파 주파수 (77 GHz)
+wavelength = c / fc       # 파장 (m)
+B = 150e6                 # 대역폭 (150 MHz)
+Tc = 100e-6               # Chirp duration (100 us)
+K = B / Tc                # Chirp rate
+Num_fast = 512            # Fast-time 샘플 수
+Num_slow = 128            # Slow-time Chirp 수
+Num_rx = 4                # 수신 안테나 개수
+d_ant = wavelength / 2    # 안테나 간격
+
+# 레이더 및 물체 초기 설정
+radar_pos = np.array([0.0, 0.0])
+
+# 물체의 위치와 속도 설정
+target_pos = np.array([10.0, 38.67])
+target_vel = np.array([2.0, 5.0])
+
+# --- 2. 송신 data 생성 함수 ---
+def generate_radar_adc(r_pos, t_pos, t_vel):
+    rel_pos = t_pos - r_pos
+    R = np.linalg.norm(rel_pos)
+    v_r = np.dot(t_vel, rel_pos) / R
+    theta = np.arctan2(rel_pos[0], rel_pos[1])
+    
+    t_fast = np.linspace(0, Tc, Num_fast, endpoint=False)
+    t_slow = np.arange(Num_slow) * Tc
+    
+    fb = (2 * K * R) / c
+    fd = (2 * v_r) / wavelength
+
+    # FMCW 레이더 수신 데이터(ADC Raw Data)를 저장할 3차원 영행렬(Zero Matrix) 초기화
+    adc_data = np.zeros((Num_fast, Num_slow, Num_rx), dtype=complex)
+    for m in range(Num_rx):
+        phase_ant = (2 * np.pi * m * d_ant * np.sin(theta)) / wavelength
+
+        T_f, T_s = np.meshgrid(t_fast, t_slow, indexing='ij')
+        # 비트 주파수(거리)와 도플러 주파수(속도), 안테나 위상차를 반영한 이상적인 복소 레이더 신호 모델링
+        signal = np.exp(1j * (2 * np.pi * (fb * T_f + fd * T_s) + phase_ant))
+        noise = (np.random.randn(*signal.shape) + 1j * np.random.randn(*signal.shape)) * 0.1
+        adc_data[:, :, m] = signal + noise
+    return adc_data, R, v_r, theta
+
+# STEP 1 데이터 실행 및 터미널 출력
+adc_data, true_R, true_V, true_Theta = generate_radar_adc(radar_pos, target_pos, target_vel)
+
+print("=" * 60)
+print("[STEP 1] FMCW ADC Raw Data 생성 결과")
+print("=" * 60)
+print(f"• Raw Data Shape : {adc_data.shape} (Fast-time, Slow-time, Rx)")
+print(f"• 실제 표적 상태 : 거리={true_R:.2f}m, 속도={true_V:.2f}m/s, 각도={np.degrees(true_Theta):.2f}°")
+print(f"• 샘플 값 (첫 안테나 3개 샘플) : {adc_data[:3, 0, 0]}")
+
+# --- 3. FFT 및 물리량 추정 함수 ---
+def process_fft_and_estimate(adc):
+    # 1 & 2. Range-Doppler 2D FFT 수행 (첫 번째 안테나 기준)
+    fft_rd = np.fft.fft2(adc[:, :, 0]) 
+    
+    # Range-Doppler Map Peak 탐색
+    mag_map = np.abs(fft_rd[:, :])
+    # range-doppler map에서 noise를 제외한 값의 index 추출
+    r_idx, v_idx = np.unravel_index(np.argmax(mag_map), mag_map.shape)
+    
+    # [거리 계산] Fast-time 축 (r_idx)
+    freq_b = r_idx / Tc
+    est_R = (c * freq_b) / (2.0 * K)
+    
+    # FFT 결과로 얻은 샘플 인덱스를 도플러 주파수(Hz)로 매핑 및 속도 계산
+    d_freqs = np.fft.fftfreq(Num_slow, d=Tc)
+    freq_d = d_freqs[v_idx]
+    est_V = (wavelength * freq_d) / 2.0
+    
+    # 3. Angle FFT (전체 안테나 축)
+    fft_3d = np.fft.fft(adc, axis=0)
+    fft_3d = np.fft.fft(fft_3d, axis=1)
+    rx_profile = fft_3d[r_idx, v_idx, :]
+    # zeropadding 을 통한 각도 FFT 수행
+    N_angle = 64
+    fft_angle = np.fft.fft(rx_profile, N_angle)
+    a_idx = np.argmax(np.abs(fft_angle))
+    
+    # FFT 결과로 얻은 샘플 인덱스를 각주파수로 매핑 및 각도 계산
+    w_freqs = np.fft.fftfreq(N_angle, d=1.0) * (2 * np.pi)
+    w = w_freqs[a_idx]
+    
+    sin_theta = (wavelength * w) / (2 * np.pi * d_ant)
+    est_theta = np.arcsin(np.clip(sin_theta, -1.0, 1.0))
+    
+    return est_R, est_V, est_theta
+
+# STEP 2 실행 및 터미널 출력
+est_R, est_V, est_Theta = process_fft_and_estimate(adc_data)
+
+print("\n" + "=" * 60)
+print("[STEP 2] 3D FFT 추출 결과 vs 실제값 비교")
+print("=" * 60)
+print(f"• 거리 (Distance) : 추정값 = {est_R:.2f}m  (실제값 = {true_R:.2f}m)")
+print(f"• 속도 (Velocity) : 추정값 = {est_V:.2f}m/s (실제값 = {true_V:.2f}m/s)")
+print(f"• 각도 (Angle)    : 추정값 = {np.degrees(est_Theta):.2f}° (실제값 = {np.degrees(true_Theta):.2f}°)")
