@@ -12,7 +12,6 @@ o	Range-Doppler 2D FFT를 통해 거리와 속도를 우선 추출하고, 공간
 
 
 
-
 2. FMCW Radar AoA Estimation: Zero-Padding vs No-Padding Analysis
 
 • 개요: 안테나 각도 추정 성능을 극대화하기 위한 제로 패딩(Zero-Padding)의 유무에 따른 차이를 집중적으로 분석·비교하는 실험용 스크립트입니다.
